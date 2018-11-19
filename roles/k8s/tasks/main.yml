@@ -1,0 +1,101 @@
+---
+ - name: Disable swap in fstab
+   mount:
+     path: none
+     src: /swapfile
+     fstype: swap
+     state: absent
+
+ - name: Add kernel module
+   modprobe:
+     name: br_netfilter
+     state: present
+
+ - name: Update kernel settings
+   sysctl:
+     name: net.bridge.bridge-nf-call-iptables
+     value: 1
+     sysctl_set: yes
+     state: present
+     reload: yes
+
+ - name: Install docker repo
+   yum_repository:
+     name: docker-ce
+     description: "Docker CE Stable"
+     baseurl: https://download.docker.com/linux/centos/7/$basearch/stable
+     enabled: yes
+     gpgcheck: yes
+     gpgkey: https://download.docker.com/linux/centos/gpg 
+
+ - name: Install kubernetes repo
+   yum_repository:
+     name: Kubernetes
+     description: Kubernetes
+     baseurl: https://packages.cloud.google.com/yum/repos/kubernetes-el7-x86_64
+     enabled: yes
+     gpgcheck: yes
+     repo_gpgcheck: yes
+     gpgkey:
+      - https://packages.cloud.google.com/yum/doc/yum-key.gpg
+      - https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg
+
+ - name: Install docker and additional packages
+   yum:
+     name:
+       - yum-utils
+       - device-mapper-persistent-data
+       - lvm2
+       - docker-ce
+       - kubelet
+       - kubeadm
+       - kubectl
+     state: present
+
+ - name: Reboot host
+   shell: "sleep 5 && reboot"
+   async: 1
+   poll: 0
+
+ - name: Wait for host to come back
+#   local_action: wait_for host={{ ansible_host }} delay=10 timeout=40
+   wait_for_connection:
+     connect_timeout: 20
+     sleep: 5
+     delay: 5
+     timeout: 60
+ 
+ - name: Start docker and kubelet
+   systemd:
+     name: '{{ item }}'
+     state: started
+     enabled: yes
+   with_items:
+     - docker
+     - kubelet
+
+ - name: Init kubernetes cluster
+   shell: kubeadm init --pod-network-cidr=10.244.0.0/16
+   when:  inventory_hostname == 'node-1'
+   register: kubeadm
+
+ - name: Get join command from output
+   set_fact:
+     join_command: "{{ kubeadm.stdout | regex_search(('kubeadm join.*$')) }}"
+   when: kubeadm is defined
+   run_once: yes
+ 
+ - name: Install flannel network
+   shell: kubectl --kubeconfig='/etc/kubernetes/admin.conf' apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
+   when:  inventory_hostname == 'node-1'
+   run_once: yes
+
+ - name: Join slave nodes to cluster
+   shell: "{{ join_command }}"
+   when: inventory_hostname != 'node-1'
+
+ - name: Copy kube config to local machine
+   fetch:
+     src: /etc/kubernetes/admin.conf
+     dest: ~/.kube/config
+
